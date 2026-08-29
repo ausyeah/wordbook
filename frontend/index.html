@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#3b5bdb" />
+  <title>单词书 · 联网版</title>
+  <link rel="stylesheet" href="./styles.css?v=20260829c" />
+</head>
+<body>
+  <!-- 登录/注册 -->
+  <div id="auth" class="auth-wrap">
+    <div class="auth-card">
+      <h1 class="brand">单词书</h1>
+      <p class="brand-sub">多设备云端同步 · 间隔重复记忆</p>
+      <div class="tabs">
+        <button class="tab active" data-auth="login">登录</button>
+        <button class="tab" data-auth="register">注册</button>
+      </div>
+      <form id="auth-form">
+        <input id="auth-user" type="text" placeholder="用户名" autocomplete="username" required />
+        <input id="auth-pass" type="password" placeholder="密码" autocomplete="current-password" required />
+        <button type="submit" class="btn-primary" id="auth-submit">登录</button>
+      </form>
+      <button type="button" id="btn-forgot" class="btn-forgot">忘记密码？</button>
+      <form id="reset-form" class="hidden">
+        <input id="rs-user" type="text" placeholder="用户名" autocomplete="username" />
+        <input id="rs-key" type="password" placeholder="恢复码" autocomplete="off" />
+        <input id="rs-new" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password" />
+        <input id="rs-new2" type="password" placeholder="确认新密码" autocomplete="new-password" />
+        <button type="submit" class="btn-primary">重置密码</button>
+        <button type="button" id="btn-back-login" class="btn-forgot">← 返回登录</button>
+      </form>
+      <p id="auth-msg" class="msg"></p>
+      <p id="rs-msg" class="msg"></p>
+      <p class="hint">首次使用请切到「注册」创建账户</p>
+    </div>
+  </div>
+
+  <!-- 主应用 -->
+  <div id="app" class="app hidden">
+    <aside class="sidebar">
+      <div class="logo">单词书</div>
+      <nav>
+        <button class="nav-item active" data-view="study">📚 学习</button>
+        <button class="nav-item" data-view="library">🔤 词库</button>
+        <button class="nav-item" data-view="wrong">📕 错题本</button>
+        <button class="nav-item" data-view="stats">📊 统计</button>
+        <button class="nav-item" data-view="settings">⚙️ 设置</button>
+      </nav>
+      <div class="sync-state" id="sync-state">已同步</div>
+      <button class="logout" id="logout">退出登录</button>
+    </aside>
+
+    <main class="main">
+      <!-- 移动端顶部同步状态栏（桌面由侧栏展示） -->
+      <div class="sync-topbar" id="sync-topbar">
+        <i class="sync-dot" id="sync-dot"></i><span id="sync-top-text">已同步</span>
+      </div>
+      <!-- 学习 -->
+      <section id="view-study" class="view">
+        <div class="study-top">
+          <span id="mode-label" class="mode-label">新题练习</span>
+          <span id="due-badge" class="badge">待复习 0</span>
+          <button id="btn-prev-top" class="btn-prev-top" disabled>← 上一个</button>
+          <button id="btn-master" class="btn-master">☆ 熟词</button>
+        </div>
+        <div class="mode-switch">
+          <button class="ms-item active" data-sm="quiz">四选一模式</button>
+          <button class="ms-item" data-sm="card">卡片模式</button>
+        </div>
+        <div id="card" class="card">
+          <div class="card-word" id="card-word">加载中…</div>
+          <div class="card-pos" id="card-pos"></div>
+          <div class="card-meaning hidden" id="card-meaning"></div>
+        </div>
+        <div id="quiz-ui">
+          <div id="options" class="options">
+            <button class="opt" data-i="0"><span class="opt-key">1</span><span class="opt-text" id="opt-text-0"></span></button>
+            <button class="opt" data-i="1"><span class="opt-key">2</span><span class="opt-text" id="opt-text-1"></span></button>
+            <button class="opt" data-i="2"><span class="opt-key">3</span><span class="opt-text" id="opt-text-2"></span></button>
+            <button class="opt" data-i="3"><span class="opt-key">4</span><span class="opt-text" id="opt-text-3"></span></button>
+          </div>
+        </div>
+        <div id="card-ui" class="card-ui hidden">
+          <button id="btn-reveal" class="btn-reveal">显示答案（Enter / 空格）</button>
+          <div id="rate-row" class="rate-row">
+            <button class="rate rate-bad" data-rate="0">1 不认识</button>
+            <button class="rate rate-fuzzy" data-rate="3">2 模糊</button>
+            <button class="rate rate-good" data-rate="4">3 认识</button>
+            <button class="rate rate-master" data-rate="5">4 很熟</button>
+          </div>
+        </div>
+        <div id="feedback" class="feedback hidden"></div>
+        <div id="nav-actions" class="nav-actions hidden">
+          <button id="btn-next" class="btn-next">下一题（Enter）</button>
+        </div>
+        <div id="study-empty" class="empty hidden"></div>
+      </section>
+
+      <!-- 词库 -->
+      <section id="view-library" class="view hidden">
+        <div class="toolbar">
+          <input id="lib-search" type="search" placeholder="搜索单词 / 释义…" />
+          <select id="lib-filter">
+            <option value="all">全部</option>
+            <option value="w">错题本</option>
+            <option value="e">曾错题</option>
+            <option value="m">熟词</option>
+            <option value="0">未学</option>
+            <option value="1">模糊</option>
+            <option value="2">认识</option>
+            <option value="3">掌握</option>
+          </select>
+        </div>
+        <div id="lib-list" class="lib-list"></div>
+      </section>
+
+      <!-- 错题本 / 曾错本 / 熟词 -->
+      <section id="view-wrong" class="view hidden">
+        <div class="wrong-tabs">
+          <button class="wt-item active" data-wt="wrong">错题本</button>
+          <button class="wt-item" data-wt="ever">曾错本</button>
+          <button class="wt-item" data-wt="master">熟词</button>
+        </div>
+        <div class="wrong-summary" id="wrong-summary"></div>
+        <div id="wrong-list" class="lib-list"></div>
+      </section>
+
+      <!-- 统计 -->
+      <section id="view-stats" class="view hidden">
+        <div class="chart-card">
+          <div class="chart-title">每日新词<span class="chart-sub" id="chart-new-sub"></span></div>
+          <div class="v-bars small" id="chart-new"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">每日正确率<span class="chart-sub" id="chart-acc-sub"></span></div>
+          <div class="acc-rows" id="chart-acc"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">最近 7 天答题<span class="chart-sub" id="chart-week-sub"></span></div>
+          <div class="v-bars" id="chart-answers"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">累计答题</div>
+          <div class="donut-row">
+            <div class="donut" id="chart-donut"></div>
+            <div class="donut-legend" id="chart-total"></div>
+          </div>
+        </div>
+        <div class="stat-grid" id="stat-grid" style="margin-top:12px;"></div>
+        <div class="level-legend">
+          <span class="lv lv0">未学</span><span class="lv lv1">模糊</span>
+          <span class="lv lv2">认识</span><span class="lv lv3">掌握</span>
+        </div>
+        <div class="setting-row col" style="margin-top:16px;">
+          <label>学习进度</label>
+          <button id="btn-reset" class="btn-danger">重置全部学习进度</button>
+          <p class="hint">将清空所有已学/错题/复习记录，单词重新变为未学（账号保留）</p>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section id="view-settings" class="view hidden">
+        <div class="welcome">👋 欢迎回来，<b id="welcome-user">…</b></div>
+        <div class="setting-row">
+          <label>每日新词目标</label>
+          <input id="set-daily" type="number" min="1" max="200" value="20" />
+        </div>
+        <div class="setting-row col">
+          <label>今日进度</label>
+          <div class="dp-bar"><i id="dp-fill"></i></div>
+          <div class="dp-row"><span id="dp-today">今日新词 0 / 20</span><span id="dp-yesterday" class="dp-yesterday"></span></div>
+          <p class="dp-msg" id="dp-msg"></p>
+        </div>
+        <div class="setting-row col">
+          <label>数据同步</label>
+          <button id="btn-sync-now" class="btn-ghost">立即同步</button>
+          <p class="hint" id="sync-detail">自动在每次答题后同步</p>
+        </div>
+        <div class="setting-row col">
+          <label>导出进度（备份）</label>
+          <button id="btn-export" class="btn-ghost">下载 JSON 备份</button>
+        </div>
+        <div class="setting-row col">
+          <label>导入进度</label>
+          <label for="btn-import" class="btn-ghost import-btn">📂 选择 JSON 备份文件</label>
+          <input id="btn-import" type="file" accept="application/json" class="hidden" />
+          <p class="hint">导入旧版导出的 JSON 备份，合并到当前进度（较新的记录优先）</p>
+        </div>
+        <div class="setting-row col">
+          <label>修改密码</label>
+          <input id="cp-old" type="password" placeholder="当前密码" autocomplete="current-password" />
+          <input id="cp-new" type="password" placeholder="新密码（至少 6 位）" autocomplete="new-password" />
+          <input id="cp-new2" type="password" placeholder="确认新密码" autocomplete="new-password" />
+          <div class="setting-actions">
+            <button id="btn-change-pw" class="btn-ghost">修改密码</button>
+          </div>
+          <p class="hint" id="cp-msg"></p>
+        </div>
+        <div class="setting-row col">
+          <label>账号</label>
+          <div class="setting-actions">
+            <button id="btn-logout" class="btn-danger">退出账号</button>
+          </div>
+          <p class="hint">学习进度已保存在云端，重新登录即可恢复</p>
+        </div>
+        <p class="hint">所有进度实时保存在云端，断网时本地缓存，恢复网络后自动补传。</p>
+      </section>
+    </main>
+
+    <!-- 移动端底部导航 -->
+    <nav class="bottom-nav">
+      <button class="bn-item active" data-view="study">📚<span>学习</span></button>
+      <button class="bn-item" data-view="library">🔤<span>词库</span></button>
+      <button class="bn-item" data-view="wrong">📕<span>错题本</span></button>
+      <button class="bn-item" data-view="stats">📊<span>统计</span></button>
+      <button class="bn-item" data-view="settings">⚙️<span>设置</span></button>
+    </nav>
+  </div>
+
+  <script src="./app.js?v=20260829d"></script>
+</body>
+</html>

@@ -1,0 +1,25 @@
+# 依赖与构建产物
+node_modules/
+package-lock.json.bak
+
+# 本地凭据与配置（绝不提交）
+.config/
+.cloudbase/
+cloudbaserc.local.json
+*.local.json
+
+# 运行/调试残留
+.log/
+logs/
+*.log
+.wrangler/
+.npm-cache/
+AppData/
+_backup/
+__pycache__/
+.DS_Store
+Thumbs.db
+
+# 编辑器
+.vscode/
+.idea/

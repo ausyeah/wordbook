@@ -1,0 +1,19 @@
+{
+  "$schema": "https://static.cloudbase.net/cli/cloudbaserc.schema.json",
+  "version": "2.0",
+  "envId": "YOUR_ENV_ID",
+  "functionRoot": "./",
+  "functions": [
+    {
+      "name": "api",
+      "timeout": 10,
+      "runtime": "Nodejs20.19",
+      "handler": "index.main",
+      "envVariables": {
+        "JWT_SECRET": "请替换为一串随机长字符串",
+        "RECOVERY_KEY": "请替换为你的找回密码恢复码"
+      },
+      "installDependency": true
+    }
+  ]
+}
