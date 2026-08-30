@@ -1,4 +1,4 @@
-(function () {
+﻿(function () {
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
@@ -8,7 +8,7 @@
   const S = {
     token: localStorage.getItem("wb_token") || null,
     username: localStorage.getItem("wb_user") || null,
-    vocab: [], vmap: {}, progress: {}, settings: { dailyGoal: 20 },
+    vocab: [], vmap: {}, progress: {}, settings: { dailyGoal: 100 },
     outbox: JSON.parse(localStorage.getItem("wb_outbox") || "[]"),
     deviceId: (function () {
       const d = localStorage.getItem("wb_device");
@@ -192,10 +192,13 @@
 
   // ---------- 同步 outbox ----------
   function saveOutbox() { localStorage.setItem("wb_outbox", JSON.stringify(S.outbox)); }
+  let _flushing = false, _retryTimer = null;
   async function flush() {
+    if (_flushing) return;                 // 防并发：上一次还没结束不重复发
     if (!S.token || !navigator.onLine || S.outbox.length === 0) return;
+    _flushing = true;
     updateSync("同步中…");
-    const batch = S.outbox.slice(0, 15); // 分块，避免 URL 过长
+    const batch = S.outbox.slice(0, 10); // 分块，避免 URL 过长
     try {
       const r = await api("/api/sync", { body: { ops: JSON.stringify(batch) } });
       if (r && r.ok) {
@@ -205,6 +208,12 @@
       } else updateSync("同步失败 · 稍后自动重试");
     } catch (e) {
       updateSync(navigator.onLine ? ("同步失败 · 已缓存 " + S.outbox.length + " 条") : ("离线缓存 " + S.outbox.length + " 条"));
+    } finally {
+      _flushing = false;
+      if (S.outbox.length > 0) {           // 还有存货：10 秒后快速重试（不必等 30 秒轮询）
+        clearTimeout(_retryTimer);
+        _retryTimer = setTimeout(flush, 10000);
+      }
     }
   }
   function startSyncLoop() {
@@ -765,6 +774,18 @@
   }
   async function renderStatsCharts() {
     if (!$("#chart-answers")) return;
+    // 总进度（本地统计：有学习记录的词 / 词库总量）
+    const vtotal = S.vocab.length;
+    let studied = 0, mastered = 0, wrongB = 0;
+    S.vocab.forEach((w) => {
+      const ps = S.progress[w.word];
+      if (ps) { studied++; if (ps.level === 3 && !ps.is_wrong_book) mastered++; if (ps.is_wrong_book) wrongB++; }
+    });
+    const tpPct = vtotal ? Math.round((studied / vtotal) * 100) : 0;
+    $("#tp-fill").style.width = tpPct + "%";
+    $("#tp-text").textContent = "已刷 " + studied + " / " + vtotal + " 词";
+    $("#tp-detail").textContent = "掌握 " + mastered + " · 错题本 " + wrongB;
+    $("#tp-sub").textContent = tpPct + "%";
     let data;
     try { data = await api("/api/stats"); } catch (e) { $("#chart-week-sub").textContent = "图表加载失败"; return; }
     const days = data.days || [];
@@ -822,41 +843,42 @@
       '<div class="dl"><span class="dot" style="background:var(--primary)"></span>总答题<b>' + t.answers + '</b></div>';
   }
 
-  // ---------- 今日进度 / 昨日完成（按东八区天为单位统计首次学习时间） ----------
+  // ---------- 今日进度 / 昨日完成（按当日答题数统计，跨设备准确，来自 /api/stats） ----------
   function cstDayNum(ms) { return Math.floor((ms + 8 * 3600 * 1000) / 86400000); }
-  function renderDailyProgress() {
+  let _dpSeq = 0;
+  async function renderDailyProgress() {
     const view = $("#view-settings");
     if (!view || view.classList.contains("hidden")) return;
-    const goal = Math.max(1, S.settings.dailyGoal || 20);
-    const today = cstDayNum(Date.now());
-    const counts = {}; // 距今天数 -> 当日新词数（0=今天, 1=昨天…）
-    for (const w in S.progress) {
-      const c = +S.progress[w].created_at || 0;
-      if (!c) continue;
-      const diff = today - cstDayNum(c);
-      if (diff >= 0 && diff <= 60) counts[diff] = (counts[diff] || 0) + 1;
-    }
-    const t = counts[0] || 0, y = counts[1] || 0;
-    // 连续达标天数：今天已达标则从今天起算，否则从昨天起算
-    let streak = 0;
-    for (let d = (t >= goal ? 0 : 1); counts[d] >= goal; d++) streak++;
-    // 渲染
+    const goal = Math.max(1, S.settings.dailyGoal || 100);
+    const seq = ++_dpSeq;
+    let days = null, total = null;
+    try {
+      const s = await api("/api/stats");
+      days = s.days || []; total = s.total || null;
+    } catch (e) { /* 拉取失败时保持现状，下次再试 */ return; }
+    if (seq !== _dpSeq) return; // 已有更新的渲染请求
+    const t = days.length ? days[days.length - 1].answers : 0;   // 今日答题数
+    const y = days.length > 1 ? days[days.length - 2].answers : 0; // 昨日答题数
     $("#dp-fill").style.width = Math.min(100, Math.round((t / goal) * 100)) + "%";
-    $("#dp-today").textContent = "今日新词 " + t + " / " + goal;
+    $("#dp-today").textContent = "今日已答 " + t + " / " + goal + " 题";
     $("#dp-yesterday").textContent =
-      y >= goal ? "昨日 " + y + " 词 · 已达标" : (y > 0 ? "昨日 " + y + " 词 · 未达标" : "昨日未学新词");
+      y >= goal ? "昨日 " + y + " 题 · 已达标" : (y > 0 ? "昨日 " + y + " 题 · 未达标" : "昨日未答题");
     let msg;
-    if (t === 0) msg = "今天还没开始，背下第一个词就赢了一半";
-    else if (t < goal) msg = t * 2 < goal ? "开局不错，保持这个节奏" : "只差 " + (goal - t) + " 个词达标，冲一冲";
+    if (t === 0) msg = "今天还没开始，答下第一题就赢了一半";
+    else if (t < goal) msg = t * 2 < goal ? "开局不错，保持这个节奏" : "只差 " + (goal - t) + " 题达标，冲一冲";
     else if (t === goal) msg = "今日目标达成！今天的你很棒";
-    else msg = "超额 " + (t - goal) + " 词，今天火力全开";
+    else msg = "超额 " + (t - goal) + " 题，今天火力全开";
+    // 连续达标天数：今天已达标则从今天起算，否则从昨天起算（days[6]=今天）
+    let streak = 0;
+    for (let d = (t >= goal ? 6 : 5); d >= 0 && days[d] && days[d].answers >= goal; d--) streak++;
     if (streak >= 2) msg += " · 已连续达标 " + streak + " 天";
+    if (total && total.answers) msg += " · 累计正确率 " + total.accuracy + "%";
     $("#dp-msg").textContent = msg;
   }
 
   // ---------- 设置 ----------
   function bindSettings() {
-    const dg = $("#set-daily"); dg.value = S.settings.dailyGoal || 20;
+    const dg = $("#set-daily"); dg.value = S.settings.dailyGoal || 100;
     dg.onchange = () => {
       S.settings.dailyGoal = +dg.value || 20;
       pushOp({ type: "setting", key: "dailyGoal", value: String(S.settings.dailyGoal), updated_at: Date.now(), op_id: "set:dailyGoal:" + Date.now() });

@@ -130,16 +130,21 @@
       <!-- 统计 -->
       <section id="view-stats" class="view hidden">
         <div class="chart-card">
+          <div class="chart-title">最近 7 天答题<span class="chart-sub" id="chart-week-sub"></span></div>
+          <div class="v-bars" id="chart-answers"></div>
+        </div>
+        <div class="chart-card">
+          <div class="chart-title">总进度<span class="chart-sub" id="tp-sub"></span></div>
+          <div class="dp-bar"><i id="tp-fill"></i></div>
+          <div class="dp-row"><span id="tp-text">已刷 0 / 0 词</span><span class="dp-yesterday" id="tp-detail"></span></div>
+        </div>
+        <div class="chart-card">
           <div class="chart-title">每日新词<span class="chart-sub" id="chart-new-sub"></span></div>
           <div class="v-bars small" id="chart-new"></div>
         </div>
         <div class="chart-card">
           <div class="chart-title">每日正确率<span class="chart-sub" id="chart-acc-sub"></span></div>
           <div class="acc-rows" id="chart-acc"></div>
-        </div>
-        <div class="chart-card">
-          <div class="chart-title">最近 7 天答题<span class="chart-sub" id="chart-week-sub"></span></div>
-          <div class="v-bars" id="chart-answers"></div>
         </div>
         <div class="chart-card">
           <div class="chart-title">累计答题</div>
@@ -164,8 +169,8 @@
       <section id="view-settings" class="view hidden">
         <div class="welcome">👋 欢迎回来，<b id="welcome-user">…</b></div>
         <div class="setting-row">
-          <label>每日新词目标</label>
-          <input id="set-daily" type="number" min="1" max="200" value="20" />
+          <label>每日目标（答题数）</label>
+          <input id="set-daily" type="number" min="1" max="2000" value="100" />
         </div>
         <div class="setting-row col">
           <label>今日进度</label>
@@ -219,6 +224,6 @@
     </nav>
   </div>
 
-  <script src="./app.js?v=20260829d"></script>
+  <script src="./app.js?v=20260829e"></script>
 </body>
 </html>
