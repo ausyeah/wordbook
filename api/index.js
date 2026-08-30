@@ -1,4 +1,4 @@
-﻿// 单词书联网版 · CloudBase HTTP 云函数后端（PostgreSQL via PostgREST）
+// 单词书联网版 · CloudBase HTTP 云函数后端（PostgreSQL via PostgREST）
 // 由 Cloudflare Worker / 腾讯云事件函数版移植：认证/JWT/PBKDF2/SM-2/同步逻辑不变
 // 数据库：CloudBase PostgreSQL，通过 PostgREST REST API (/v1/rdb/rest) 访问
 const express = require("express");
@@ -56,12 +56,12 @@ async function hashPassword(password, saltHex) { return pbkdf2(password, Buffer.
 function applySRS(s, rating) {
   let { level = 0, interval_days = 0, ease = 2.5, reps = 0, lapses = 0 } = s;
   if (rating < 3) { reps = 0; interval_days = 1; level = Math.max(0, level - 1); lapses += 1; }
-  else {
-    if (reps === 0) interval_days = 1; else if (reps === 1) interval_days = 6; else interval_days = Math.round(interval_days * ease);
-    ease = ease + (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02));
-    if (ease < 1.3) ease = 1.3;
-    reps += 1; level = Math.min(3, level + 1);
-  }
+    else {
+      // 快速刷一轮模式：答对 = 会了，本轮不再复习（due_at 推到一年后）；错题本词由外层逻辑次日复习直到毕业（与前端镜像一致）
+      iv = Math.max(iv, 365);
+      reps += 1;
+      level = 3;
+    }
   return { level, interval_days, ease, reps, lapses, due_at: Date.now() + interval_days * 86400000 };
 }
 

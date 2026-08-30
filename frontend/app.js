@@ -1,4 +1,4 @@
-﻿(function () {
+(function () {
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
@@ -66,10 +66,10 @@
     let level = s.level || 0, iv = s.interval_days || 0, ease = s.ease || 2.5, reps = s.reps || 0, laps = s.lapses || 0;
     if (rating < 3) { reps = 0; iv = 1; level = Math.max(0, level - 1); laps += 1; }
     else {
-      if (reps === 0) iv = 1; else if (reps === 1) iv = 6; else iv = Math.round(iv * ease);
-      ease += (0.1 - (5 - rating) * (0.08 + (5 - rating) * 0.02));
-      if (ease < 1.3) ease = 1.3;
-      reps += 1; level = Math.min(3, level + 1);
+      // 快速刷一轮模式：答对 = 会了，本轮不再复习（due_at 推到一年后）；错题本词由外层逻辑次日复习直到毕业
+      iv = Math.max(iv, 365);
+      reps += 1;
+      level = 3;
     }
     return { level, interval_days: iv, ease, reps, lapses: laps, due_at: Date.now() + iv * 86400000 };
   }
