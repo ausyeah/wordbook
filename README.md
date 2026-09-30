@@ -11,9 +11,37 @@
 [![词库](https://img.shields.io/badge/vocab-4356%20words-0078D4)](frontend/vocab.json)
 [![Stack](https://img.shields.io/badge/frontend-vanilla%20JS-0078D4)]()
 
-[功能](#功能) · [架构](#架构) · [同步引擎](#核心设计多设备同步引擎) · [部署](#部署) · [技术文档](docs/技术方案与实现分析.md)
+[界面](#界面) · [功能](#功能) · [架构](#架构) · [同步引擎](#核心设计多设备同步引擎) · [部署](#部署) · [技术文档](docs/技术方案与实现分析.md)
 
 </div>
+
+---
+
+## 界面
+
+> 截图由真实前端 + 本地 mock 后端渲染，数据是**随机生成的代表性样例**，不含任何真实账号信息。
+
+### 学习页：四选一，答对即退出本轮
+
+<p align="center">
+  <img src="docs/screenshots/02-study.png" alt="学习页：单词 radiant 的四选一界面，含词性、主释义与数字键快捷作答" width="820">
+</p>
+
+### 错题本：答错的词单列，连对 3 次毕业
+
+<p align="center">
+  <img src="docs/screenshots/03-wrongbook.png" alt="错题本列表：每词显示答错次数、答对次数与连对进度，可手动移出错题本" width="820">
+</p>
+
+### 统计：纯 CSS/SVG，零图表库
+
+<p align="center">
+  <img src="docs/screenshots/04-stats.png" alt="统计页：最近 7 天答题量堆叠柱、总进度、每日新词柱状图、每日正确率横向条" width="820">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/01-login.png" alt="登录页：登录 / 注册切换，底部提示首次使用切到注册创建账户" width="420">
+</p>
 
 ---
 
