@@ -56,9 +56,9 @@ async function hashPassword(password, saltHex) { return pbkdf2(password, Buffer.
 function applySRS(s, rating) {
   let { level = 0, interval_days = 0, ease = 2.5, reps = 0, lapses = 0 } = s;
   if (rating < 3) { reps = 0; interval_days = 1; level = Math.max(0, level - 1); lapses += 1; }
-    else {
+  else {
       // 快速刷一轮模式：答对 = 会了，本轮不再复习（due_at 推到一年后）；错题本词由外层逻辑次日复习直到毕业（与前端镜像一致）
-      iv = Math.max(iv, 365);
+      interval_days = Math.max(interval_days, 365);
       reps += 1;
       level = 3;
     }
