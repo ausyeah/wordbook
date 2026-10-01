@@ -114,6 +114,19 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .ms-item { flex: 1; padding: 8px; border-radius: 9px; font-size: 14.5px; color: var(--muted); letter-spacing: .04em; }
 .ms-item.active { background: var(--card); color: var(--primary); box-shadow: 0 1px 3px rgba(38,36,44,.08); }
 
+/* ---------- 循环复习轮次 ---------- */
+.round-panel {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--primary);
+  border-radius: 12px; padding: 10px 14px; margin-bottom: 16px;
+}
+.round-info { font-size: 13.5px; color: var(--muted); letter-spacing: .03em; }
+.btn-round {
+  padding: 7px 14px; border-radius: 9px; border: 1px solid var(--primary);
+  color: var(--primary); background: transparent; font-size: 13.5px; white-space: nowrap;
+}
+.btn-round:active { background: var(--primary); color: var(--card); }
+
 /* ---------- 单词卡 ---------- */
 .card {
   background: var(--card); border: 1px solid var(--border); border-radius: 18px;

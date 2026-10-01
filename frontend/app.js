@@ -34,8 +34,12 @@
       return n;
     })(),
     current: null,
+    senseQ: null,           // 义项辨析模式的当前题 {word, sense, options}
     mode: "new",              // 'review' 复习中 | 'new' 新题练习
-    studyMode: localStorage.getItem("wb_study_mode") || "quiz",  // 'quiz' 四选一 | 'card' 卡片
+    studyMode: localStorage.getItem("wb_study_mode") || "quiz",  // 'quiz' 四选一 | 'card' 卡片 | 'sense' 义项
+    // 循环复习轮次。progress[word].updated_at 是云端权威时间戳，
+    // 轮次进度直接由它派生，不额外存字段（见 roundQueue 注释）。
+    round: { n: 0, startedAt: 0 },
     pending: [],              // 待复习队列（word 对象）
     answered: false,
     options: [],              // 当前题四选项 [{text, correct}]
@@ -180,7 +184,7 @@
     }
     await loadState(); // 内部已 catch，失败也能用本地数据继续
     try { bindUI(); } catch (e) { showFatal("界面初始化失败，请刷新重试", e); return; }
-    switchView("study"); startStudy(); updateSync("已同步"); startSyncLoop();
+    switchView("study"); startStudy(); renderRoundPanel(); updateSync("已同步"); startSyncLoop();
   }
   function showFatal(msg, err) {
     const empty = $("#study-empty");
@@ -250,6 +254,13 @@
         if (!l || (st.updated_at || 0) >= (l.updated_at || 0)) S.progress[w] = st;
       }
       if (r.settings && r.settings.dailyGoal) S.settings.dailyGoal = +r.settings.dailyGoal;
+      // 轮次状态存在 settings 表里，随多设备同步
+      if (r.settings && r.settings.round) {
+        try {
+          const rd = typeof r.settings.round === "string" ? JSON.parse(r.settings.round) : r.settings.round;
+          if (rd && typeof rd.startedAt === "number") S.round = { n: rd.n || 0, startedAt: rd.startedAt };
+        } catch (e) { /* 轮次状态损坏时退回"未开轮次"，不影响学习 */ }
+      }
     } catch (e) {}
   }
 
@@ -385,6 +396,85 @@
   function resetSession() {
     S.qCount = 0; S.sessionDone = {}; S.defer = []; S.deferCount = {}; S.reWrong = {}; S.history = [];
   }
+
+  // ================= 循环复习轮次 =================
+  //
+  // 背景：当前 SRS 是「答对即退出本轮」，due_at 推到 +365 天。
+  // 考研初试约在 12 月下旬，而 4356 词走完一轮就要 2~3 个月 —— 一轮结束后
+  // 所有已掌握的词都落在考期之外，不会再出现第二次，考前只剩错题本在转。
+  //
+  // 这里补的不是自动间隔（那会与「刷一轮」的产品定位冲突），而是**手动开新轮次**：
+  // 用户决定何时开始第 N 轮，系统按薄弱程度排序把已学过的词重新召回。
+  //
+  // 轮次进度**不额外存字段**，而是由每个词的 updated_at 派生：
+  //   属于本轮 ⟺ 该词已学过（level>0 / ever_wrong / is_mastered / wrong_count>0）
+  //             且 updated_at <= 本轮开始时间
+  // 答完一题，它的 updated_at 被推到当下（> startedAt）→ 自动离开队列。
+  // 好处：进度天然随 S.progress 同步到所有设备，不需要额外的表或列。
+
+  /** 本轮剩余词（按薄弱程度排序：错得多的先来） */
+  function roundQueue() {
+    if (!S.round.startedAt) return [];
+    const cutoff = S.round.startedAt;
+    return S.vocab.filter((w) => {
+      const st = S.progress[w.word];
+      if (!st) return false;                                   // 纯新词不参与循环轮次
+      const studied = st.level > 0 || st.ever_wrong || st.is_mastered || (st.wrong_count || 0) > 0;
+      return studied && (st.updated_at || 0) <= cutoff;
+    }).sort((a, b) => {
+      const sa = S.progress[a.word], sb = S.progress[b.word];
+      // 错得多的先复习；其次是错题本里的；再次是最近错的；最后按词序保证稳定
+      return (sb.wrong_count || 0) - (sa.wrong_count || 0)
+        || (sb.lapses || 0) - (sa.lapses || 0)
+        || (sb.wrong_added_at || 0) - (sa.wrong_added_at || 0)
+        || (a.word < b.word ? -1 : 1);
+    });
+  }
+
+  function saveRoundSetting() {
+    pushOp({ type: "setting", key: "round", value: JSON.stringify(S.round), updated_at: nextTs("__round__"), op_id: "set:round:" + Date.now() });
+  }
+  function startRound() {
+    const q = roundQueue();
+    S.round = { n: (S.round.n || 0) + 1, startedAt: Date.now() };
+    saveRoundSetting();
+    resetSession();
+    S.mode = "new";
+    S.pending = [];
+    startStudy();
+    renderRoundPanel();
+    updateSync("已同步");
+  }
+  /** 还没开始过任何一轮，但已经学过一些词 → 提示可以开第 1 轮 */
+  function canStartRound() {
+    if (S.round.startedAt) return roundQueue().length > 0;
+    return S.vocab.some((w) => {
+      const st = S.progress[w.word];
+      return st && (st.level > 0 || st.is_mastered || st.ever_wrong);
+    });
+  }
+
+  function renderRoundPanel() {
+    const panel = $("#round-panel");
+    if (!panel) return;
+    const studied = S.vocab.filter((w) => {
+      const st = S.progress[w.word];
+      return st && (st.level > 0 || st.is_mastered || st.ever_wrong || (st.wrong_count || 0) > 0);
+    }).length;
+    if (studied === 0) { panel.classList.add("hidden"); return; }
+    panel.classList.remove("hidden");
+    if (S.round.startedAt) {
+      const q = roundQueue();
+      const total = Math.max(studied, 1);
+      $("#round-info").textContent = q.length
+        ? "第 " + S.round.n + " 轮 · 剩余 " + q.length + " / " + total + " 词"
+        : "第 " + S.round.n + " 轮已完成 🎉";
+      $("#btn-round").textContent = q.length ? "重新开始本轮" : "开始第 " + (S.round.n + 1) + " 轮";
+    } else {
+      $("#round-info").textContent = "已学 " + studied + " 词 · 还没开始过循环轮次";
+      $("#btn-round").textContent = "开始第 1 轮";
+    }
+  }
   // 每天首次打开：先复习全部到期题；完成前不进新题
   function startStudy() {
     resetSession();
@@ -414,7 +504,7 @@
       S.defer.push({ word, at: S.qCount });
     }
   }
-  // 新题选题：先出"稍后重现"队列（已隔 8 题），否则错题本 70% / 新词 30%
+  // 新题选题：循环轮次激活时优先从轮次队列取；否则错题本 70% / 新词 30%
   function pickNewWord() {
     while (S.defer.length) {
       const d = S.defer[0];
@@ -431,6 +521,12 @@
       if (!st) return true;                                  // 纯新词
       return st.level === 0 && !st.is_mastered && !st.is_wrong_book; // 回到未学状态（含取消熟词）
     });
+    // 轮次队列：已学过且本轮还没复习过的词，按薄弱程度排在最前。
+    // 放在 wrong 之前 —— 用户主动开了新一轮就是要过一遍，别被错题本分流掉。
+    if (S.round.startedAt) {
+      const q = roundQueue().filter((w) => !done[w.word] && !inDefer(w) && !capped(w));
+      if (q.length) return q[0];
+    }
     if (wrong.length && fresh.length) return Math.random() < 0.7 ? wrong[rand(wrong.length)] : fresh[rand(fresh.length)];
     if (wrong.length) return wrong[rand(wrong.length)];
     if (fresh.length) return fresh[rand(fresh.length)];
@@ -494,6 +590,81 @@
     add(S.vocab);
     return picked.slice(0, n);
   }
+  /**
+   * 拆分义项：词库的 meaning 形如「n. 地址；vt. 寄往」，用「；」分出多个义项。
+   * 实测 4356 词里 1951 词（44.8%）是双义项，没有 3 个以上的。
+   */
+  function splitSenses(meaning) {
+    return String(meaning == null ? "" : meaning)
+      .split(/[；;]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  /** 义项归一化，用于判断两个义项是否等价（避免出现两个正确答案） */
+  function normSense(s) {
+    return String(s).replace(/[（）()\s、，,；;。.．·:：\/／]/g, "").toLowerCase();
+  }
+  /** 多义词池：有 2 个及以上义项的词 */
+  function multiSenseWords() {
+    if (!S._multiCache || S._multiCacheFor !== S.vocab.length) {
+      S._multiCache = S.vocab.filter((w) => w.meaning && splitSenses(w.meaning).length >= 2);
+      S._multiCacheFor = S.vocab.length;
+    }
+    return S._multiCache;
+  }
+  /** 义项里是否含词性前缀（n. / vt. / adj. 等） */
+  function sensePos(sense) {
+    const m = String(sense).match(/^([a-zA-Z]+(?:\s*\/\s*[a-zA-Z]+)*\.?)/);
+    return m ? m[1].replace(/\./g, "").replace(/\s+/g, "") : "";
+  }
+  /**
+   * 义项辨析出题：给出**某一个义项**，问是哪个词。
+   *
+   * 为什么是这个方向而不是「给词选义项」：后者有多个正确答案
+   * （一个词有 2 个义项，选项里放哪个都算对），无法判分。
+   * 反过来「给义项选词」答案唯一。
+   *
+   * 解决的真实问题：常规四选一的选项是「n. 地址；vt. 寄往」这种
+   * 多义项拼接字符串，只认出第一个义项（address = 地址）也能匹配判对 ——
+   * 这是假阳性，熟词僻义根本没被考到。按义项单独考就绕不过去了。
+   */
+  function buildSenseQuestion() {
+    const pool = multiSenseWords();
+    if (!pool.length) return null;
+    const word = pool[rand(pool.length)];
+    const senses = splitSenses(word.meaning);
+    const sense = senses[rand(senses.length)];
+    const sid = S.synIdOf.get(word.word);
+    const target = normSense(sense);
+
+    // 干扰项：优先同簇（形近词里挑义项最接近的，辨析价值最高），
+    // 但必须排除「释义里也含这个义项」的词 —— 那会变成第二个正确答案。
+    const sibs = (S.clusterOf.get(word.word) || []).map((w) => S.vmap[w]).filter(Boolean);
+    const myPos = posSet(word.pos);
+    const picked = [], usedWords = new Set([word.word]);
+    const add = (list) => {
+      for (const w of list) {
+        if (picked.length >= 3) return;
+        if (!w || usedWords.has(w.word) || !w.meaning) continue;
+        const wsid = S.synIdOf.get(w.word);
+        if (sid !== undefined && sid !== -1 && wsid === sid) continue;
+        // 释义含同一义项 → 也会判对，排除
+        if (splitSenses(w.meaning).some((x) => normSense(x) === target)) continue;
+        picked.push(w); usedWords.add(w.word);
+      }
+    };
+    add(sibs.filter((w) => overlaps(posSet(w.pos), myPos)));
+    add(sibs);
+    for (const p of myPos) add((S.byPos.get(p) || []).map((w) => S.vmap[w]).filter(Boolean));
+    add(S.vocab);
+    if (picked.length < 3) return null;
+
+    // 位置打乱，正确答案是词本身
+    const opts = [{ word: word.word, correct: true }].concat(picked.map((w) => ({ word: w.word, correct: false })));
+    for (let i = opts.length - 1; i > 0; i--) { const j = rand(i + 1); const t = opts[i]; opts[i] = opts[j]; opts[j] = t; }
+    return { word, sense, options: opts };
+  }
+
   function buildOptions(word) {
     const correct = word.meaning || "";
     const dist = pickDistractors(word, 3).map((w) => w.meaning);
@@ -558,9 +729,25 @@
         word = pickNewWord();
         if (!word) {
           hideStudyCard();
-          $("#mode-label").textContent = "全部学完";
+          // 清残留，否则 S.current/S.options 仍是上一题的值，
+          // 键盘 1-4 会把幽灵答题写进 SRS（前端审计 finding #9）
+          S.current = null; S.options = []; S.answered = true;
           const empty = $("#study-empty"); empty.classList.remove("hidden");
-          empty.innerHTML = "🎉 词库已全部学习完毕！之后每天只需完成复习。";
+          const q = S.round.startedAt ? roundQueue() : [];
+          if (S.round.startedAt && !q.length) {
+            $("#mode-label").textContent = "第 " + S.round.n + " 轮完成";
+            empty.innerHTML = "🎉 第 " + S.round.n + " 轮完成！<br><br>" +
+              '<button class="btn-primary" id="btn-next-round">开始第 ' + (S.round.n + 1) + ' 轮</button>';
+            const b = $("#btn-next-round"); if (b) b.onclick = () => startRound();
+          } else {
+            $("#mode-label").textContent = "全部学完";
+            empty.innerHTML = "🎉 词库已全部学习完毕！<br><br>" +
+              (canStartRound()
+                ? '<button class="btn-primary" id="btn-next-round">开始第 1 轮循环复习</button>'
+                : "之后每天只需完成复习。");
+            const b = $("#btn-next-round"); if (b) b.onclick = () => startRound();
+          }
+          renderRoundPanel();
           return;
         }
       }
@@ -579,6 +766,27 @@
       $$(".opt").forEach((b, i) => {
         b.classList.remove("correct", "wrong", "disabled");
         renderOptText(b.querySelector(".opt-text"), S.options[i] ? S.options[i].text : "");
+      });
+    } else if (S.studyMode === "sense") {
+      // 义项辨析：题干是义项，选项是词。渲染逻辑与 quiz 共用同一套选项按钮。
+      if (!keepOptions || !S.senseQ || S.senseQ.word.word !== word.word) {
+        const q = buildSenseQuestion();
+        // 构造不出题（多义词太少）时退回常规四选一，不让用户卡住
+        if (!q) { S.studyMode = "quiz"; switchStudyMode("quiz"); return; }
+        S.senseQ = q;
+        S.options = q.options.map((o) => ({ text: o.word, correct: o.correct }));
+      }
+      const q = S.senseQ;
+      $("#card-word").textContent = q.sense;      // 题干显示义项
+      $("#card-pos").textContent = "";
+      $("#quiz-ui").classList.remove("hidden");
+      $("#card-ui").classList.add("hidden");
+      $$(".opt").forEach((b, i) => {
+        b.classList.remove("correct", "wrong", "disabled");
+        const t = b.querySelector(".opt-text");
+        t.textContent = "";
+        const o = S.options[i];
+        if (o) t.textContent = o.text;           // 词本身不需要拆词性，直接纯文本
       });
     } else {
       $("#quiz-ui").classList.add("hidden");
@@ -600,6 +808,9 @@
     const ptop = $("#btn-prev-top"); if (ptop) ptop.disabled = S.history.length === 0;
     if (prev.options && prev.options.length) {
       S.options = prev.options;             // 保留原选项（同一题原样重出）
+      if (S.studyMode === "sense" && prev.sense) {
+        S.senseQ = { word: S.current, sense: prev.sense, options: prev.options.map((o) => ({ word: o.text, correct: o.correct })) };
+      }
       renderQuestion(S.current, true);
     } else {
       renderQuestion(S.current);
@@ -642,7 +853,8 @@
       wrong_count, correct_count, rev: (base.rev || 0) + 1, updated_at: Date.now(),
     };
     S.qCount += 1;
-    if (S.studyMode === "quiz") S.history.push({ word, options: S.options.map((o) => ({ text: o.text, correct: o.correct })) });
+    // 义项模式也要保留选项，否则「上一个」重出时会把词当成义项显示
+    if (S.studyMode === "quiz" || S.studyMode === "sense") S.history.push({ word, options: S.options.map((o) => ({ text: o.text, correct: o.correct })), sense: S.studyMode === "sense" && S.senseQ ? S.senseQ.sense : null });
     else S.history.push({ word, options: [] });
     if (S.history.length > 20) S.history.shift();
     renderDailyProgress(); // 若设置页可见则实时刷新今日进度
@@ -672,7 +884,11 @@
     } else {
       fb.classList.remove("ok"); fb.classList.add("bad");
       const right = S.options.find((o) => o.correct);
-      fb.textContent = "✗ 答错了，正确答案：" + (right ? right.text : "") + "（稍后会再考你）";
+      // 义项模式下 right.text 是词，补上完整释义才看得出「这个义项属于哪个词」
+      const tail = (S.studyMode === "sense" && right && S.vmap[right.text])
+        ? "（" + right.text + " = " + S.vmap[right.text].meaning + "）"
+        : "";
+      fb.textContent = "✗ 答错了，正确答案：" + (right ? right.text : "") + tail + "（稍后会再考你）";
     }
     $("#nav-actions").classList.add("hidden");
     if (S.mode === "review") $("#mode-label").textContent = "复习中 · 剩余 " + S.pending.length + " 题";
@@ -722,6 +938,7 @@
   function switchStudyMode(m) {
     S.studyMode = m;
     localStorage.setItem("wb_study_mode", m);
+    S.senseQ = null;   // 切换模式后重新出题，避免沿用上一模式的题面
     $$(".ms-item").forEach((b) => b.classList.toggle("active", b.dataset.sm === m));
     if (S.current) {
       // 保持当前词不换题，仅切换呈现模式（已答的会重置为未答重新展示）
@@ -731,6 +948,7 @@
     }
   }
   function nextStep() {
+    renderRoundPanel();   // 每答一题轮次剩余数会变
     if (S.mode === "review" && S.pending.length === 0) showReviewDone(); else renderQuestion();
   }
   // 标记熟词：不再重复考察（level=3 + due_at 远期 + 移出错题本 + 本会话不再出）
@@ -773,6 +991,8 @@
     const pt = $("#btn-prev-top"); if (pt) pt.onclick = prevQuestion;
     const nx = $("#btn-next"); if (nx) nx.onclick = nextStep;
     const ms = $("#btn-master"); if (ms) ms.onclick = markMastered;
+    const rb = $("#btn-round");
+    if (rb) rb.onclick = () => { startRound(); renderQuestion(); };
     // 键盘：1-4 选选项/评分；Enter/空格 显示答案或下一题
     document.addEventListener("keydown", (e) => {
       const t = e.target;
@@ -781,7 +1001,7 @@
       if (e.key >= "1" && e.key <= "4") {
         e.preventDefault(); // 阻止浏览器"快速查找"等默认行为
         const idx = +e.key - 1;
-        if (S.studyMode === "quiz") {
+        if (S.studyMode === "quiz" || S.studyMode === "sense") {
           answer(idx);
         } else {
           // 卡片模式：按 1-4 直接显示答案并评分（认识/模糊/很熟/不认识）
