@@ -24,6 +24,7 @@
     token: localStorage.getItem("wb_token") || null,
     username: localStorage.getItem("wb_user") || null,
     vocab: [], vmap: {}, progress: {}, settings: { dailyGoal: 100 },
+    clusterOf: new Map(), synIdOf: new Map(), byPos: new Map(), indexReady: false,
     outbox: readLS("wb_outbox", [], true),
     deviceId: (function () {
       const d = localStorage.getItem("wb_device");
@@ -200,6 +201,7 @@
         if (!data || !Array.isArray(data.words) || data.words.length === 0) throw new Error("词库数据格式错误");
         S.vocab = data.words; S.vmap = {};
         S.vocab.forEach((w) => (S.vmap[w.word] = w));
+        await loadVocabIndex();
         return;
       } catch (e) {
         lastErr = e;
@@ -207,6 +209,38 @@
       }
     }
     throw lastErr || new Error("词库加载失败");
+  }
+
+  /**
+   * 载入词根索引（scripts/build-vocab-index.js 的产物，5.8 KB）。
+   *
+   * 索引缺失或损坏时不能阻断学习 —— 降级为"全库随机出题"，
+   * 也就是本次改动之前的行为，只是丢掉了形近词辨析训练。
+   */
+  async function loadVocabIndex() {
+    S.clusterOf = new Map(); S.synIdOf = new Map(); S.byPos = new Map();
+    try {
+      const res = await fetch("vocab-index.json", { cache: "force-cache" });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const idx = await res.json();
+      if (!idx || idx.version !== 1) throw new Error("索引版本不匹配");
+      // 索引结构是 { 前缀: [该簇的词...] }，要反查成 { 词: [同簇其他词] }。
+      // 注意不能把词自己映射到自己 —— 那样每个词的"同簇"只有它自己，
+      // L1/L2 永远取不到任何词，干扰项会退回全库随机（实测同根率仍是 0.20%）。
+      for (const [, words] of Object.entries(idx.clusters || {})) {
+        for (const w of words) {
+          if (!S.clusterOf.has(w)) S.clusterOf.set(w, words.slice());
+        }
+      }
+      for (let i = 0; i < (idx.synGroups || []).length; i++)
+        for (const w of idx.synGroups[i]) S.synIdOf.set(w, i);
+      for (const [pos, words] of Object.entries(idx.byPos || {}))
+        S.byPos.set(pos, words);
+      S.indexReady = true;
+    } catch (e) {
+      S.indexReady = false;   // 降级：仍可答题，只是干扰项回到全库随机
+      console.warn("词根索引加载失败，干扰项降级为全库随机：", e && e.message);
+    }
   }
   async function loadState() {
     try {
@@ -373,17 +407,69 @@
     if (S.defer.length) { const d = S.defer.shift(); return S.vmap[d.word]; }
     return null;
   }
+  /**
+   * 四选一干扰项选取：分层抽取，优先同词根。
+   *
+   * 原实现从全库随机抽，实测同词根干扰项只占 0.20% —— comp*(40 词)、cons*(29)、
+   * inte*(30) 这些考研最易混的形近词几乎从不同时出现，辨析能力从未被考察。
+   *
+   * 分四层，每层从上一层没拿够的候选里取：
+   *   L1 同簇 + 同词性   ← 最有价值：compete vs competitive vs competition
+   *   L2 同簇（跨词性）   ← comp* 里的 companion(n) 对 compare(vt)，难度略降但仍同根
+   *   L3 同词性全库      ← 保证干扰项与答案词性一致，可排除"猜词性"
+   *   L4 全库随机        ← 兜底
+   *
+   * 硬约束：同一释义组的词绝不入池。词库有 28 组释义完全相同的词
+   * （obvious/evident 均为"明显的"），同根干扰项会放大这个冲突，
+   * 不排除就会出现两个正确答案。
+   */
+  /** 拆分词性：「vt. / vi. / n.」→ ['vt','vi','n']。 */
+  function posSet(pos) {
+    const parts = String(pos == null ? "" : pos)
+      .split(/[/／]/)
+      .map((s) => s.trim().replace(/\.$/, "").trim())
+      .filter((s) => /^[a-zA-Z]+$/.test(s));
+    return parts.length ? parts : ["x"];
+  }
+  function overlaps(a, b) { for (const x of a) if (b.indexOf(x) >= 0) return true; return false; }
+
+  function pickDistractors(word, n) {
+    const picked = [], used = new Set();
+    const sid = S.synIdOf.get(word.word);
+    const add = (list) => {
+      if (picked.length >= n) return;
+      for (const w of list) {
+        if (picked.length >= n) return;
+        if (!w || w.word === word.word || used.has(w.word)) continue;
+        if (!w.meaning) continue;
+        // 同义组排除：否则会产生两个正确答案
+        if (sid !== undefined && sid !== -1 && S.synIdOf.get(w.word) === sid) continue;
+        if (used.has(w.meaning)) continue;   // 释义文本重复
+        picked.push(w); used.add(w.word); used.add(w.meaning);
+      }
+    };
+
+    // L1 / L2：同簇，词性一致的排前面
+    // 词性按「拆分后的集合」比而非字符串相等：词库存的是「vt. / vi. / n.」这类
+    // 复合串，直接比字符串会把 vt./vi. 和 vi./vt. 判成不同词性。
+    const sibs = (S.clusterOf.get(word.word) || [])
+      .map((w) => S.vmap[w])
+      .filter(Boolean);
+    const myPos = posSet(word.pos);
+    add(sibs.filter((w) => overlaps(posSet(w.pos), myPos)));
+    add(sibs);
+    // L3：同词性全库。逐个词性桶依次尝试，第一个桶取不满再取下一个。
+    for (const p of myPos) add((S.byPos.get(p) || []).map((w) => S.vmap[w]).filter(Boolean));
+    // L4：全库兜底
+    add(S.vocab);
+    return picked.slice(0, n);
+  }
   function buildOptions(word) {
     const correct = word.meaning || "";
-    const pool = S.vocab.filter((w) => w.word !== word.word && w.meaning && w.meaning !== correct);
-    const dist = [], used = new Set([correct]);
-    let guard = 0;
-    while (dist.length < 3 && guard++ < 500) {
-      const c = pool[rand(pool.length)];
-      if (c && !used.has(c.meaning)) { dist.push(c.meaning); used.add(c.meaning); }
-    }
-    // 干扰项不足时兜底补足（只要文本与已用项不同）
+    const dist = pickDistractors(word, 3).map((w) => w.meaning);
+    // 极端兜底：索引缺失或释义全部重复时，从全库补齐，保证一定有 4 个可选项
     if (dist.length < 3) {
+      const used = new Set([correct, ...dist]);
       for (const w of S.vocab) {
         if (dist.length >= 3) break;
         const m = w.meaning || "";
