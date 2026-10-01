@@ -295,11 +295,22 @@ app.all("/api/sync", async (req, res) => {
     else { ops = req.body && Array.isArray(req.body.ops) ? req.body.ops : []; }
     const touched = {};
     const applied = [];
+    const failed = [];
 
+    // 逐 op 隔离异常。
+    // 原先整个循环只有一个 try（路由末尾），任何一条 op 抛错都会中断整批：
+    // 已处理的前缀落库、后面的全部丢弃，而前端拿到非 ok 响应会保留整批
+    // 并每 10 秒重试 —— 前缀被 reviewExists 跳过，坏的那条永远排在队首，
+    // 于是 outbox 永久死锁。这正是 2026-10-01 实测到的现象：
+    // 一条 setting op 因 `op_id is not defined` 抛错，20 条记录卡在队列里。
     for (const op of ops) {
+      try {
       if (op.type === "answer") {
         const { word, rating, occurred_at, op_id } = op;
         if (!word || rating == null || !op_id) continue;
+        // rating 取值域：quiz 传 5/0，卡片传 0/3/4/5。
+        // 不校验的话 rating=99 会被当成"答对"写入 review_log，污染统计口径。
+        if (!Number.isFinite(Number(rating)) || Number(rating) < 0 || Number(rating) > 5) continue;
         if (await reviewExists(uid, op_id)) {
           const cur = await findState(uid, word);
           if (cur) touched[word] = rowToState(cur);
@@ -374,13 +385,20 @@ app.all("/api/sync", async (req, res) => {
         }
         applied.push(op_id || ("state:" + word));
       } else if (op.type === "setting") {
-        const { key, value, updated_at } = op;
+        const { key, value, updated_at, op_id } = op;
         if (!key) continue;
         await upsertSetting(uid, key, value, updated_at || Date.now());
         applied.push(op_id || ("set:" + key));
       }
+      } catch (e) {
+        // 记录失败的 op_id 回传给客户端，并写入云函数日志
+        // （此前全文件零 console.error，静默失败完全无法排查）
+        const oid = op && op.op_id;
+        console.error("[sync] op failed", oid, op && op.type, (e && e.message) || e);
+        if (oid) failed.push(oid);
+      }
     }
-    return res.json({ ok: true, applied, wordStates: touched });
+    return res.json({ ok: true, applied, failed, wordStates: touched });
   } catch (e) { return res.status(e.status || 500).json({ error: String((e && e.message) || e) }); }
 });
 

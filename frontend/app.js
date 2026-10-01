@@ -268,6 +268,7 @@
     }
   }
   let _flushing = false, _retryTimer = null, _loopBound = false;
+  const _failedState = { tries: {} };   // op_id → 已被服务端拒绝的次数
   async function flush() {
     if (_flushing) return;                 // 防并发：上一次还没结束不重复发
     if (!S.token || !navigator.onLine || S.outbox.length === 0) return;
@@ -277,9 +278,26 @@
     try {
       const r = await api("/api/sync", { body: { ops: JSON.stringify(batch) } });
       if (r && r.ok) {
-        S.outbox = S.outbox.filter((op) => !batch.includes(op)); saveOutbox();
-        if (r.wordStates) for (const [w, st] of Object.entries(r.wordStates)) S.progress[w] = st;
-        updateSync("已同步");
+        // 服务端逐 op 隔离后，失败项在 failed[] 里单独回传（而不是整批 500）。
+        // 丢弃它们，否则这一条会永远排在新批次队首，把整个 outbox 拖死。
+        const failed = _failedState;
+        if (r.failed && r.failed.length) {
+          const dead = new Set(r.failed.filter((id) => shouldDropOp(id, failed)));
+          if (dead.size) {
+            S.outbox = S.outbox.filter((op) => !dead.has(op.op_id));
+            console.warn("以下记录连续 3 次被服务端拒绝，已丢弃：", [...dead]);
+          }
+          const retry = r.failed.length - dead.size;
+          S.outbox = S.outbox.filter((op) => !batch.includes(op)); saveOutbox();
+          if (r.wordStates) for (const [w, st] of Object.entries(r.wordStates)) S.progress[w] = st;
+          updateSync(dead.size ? ("已同步 · " + dead.size + " 条已丢弃") : "已同步");
+          if (retry) updateSync("同步中 · " + retry + " 条待重试");
+        } else {
+          S.outbox = S.outbox.filter((op) => !batch.includes(op)); saveOutbox();
+          for (const op of batch) delete _failedState.tries[op.op_id];
+          if (r.wordStates) for (const [w, st] of Object.entries(r.wordStates)) S.progress[w] = st;
+          updateSync("已同步");
+        }
       } else updateSync("同步失败 · 稍后自动重试");
     } catch (e) {
       updateSync(navigator.onLine ? ("同步失败 · 已缓存 " + S.outbox.length + " 条") : ("离线缓存 " + S.outbox.length + " 条"));
@@ -303,6 +321,18 @@
     setInterval(flush, 30000);
   }
   function pushOp(op) { S.outbox.push(op); saveOutbox(); flush(); }
+  /**
+   * 判断某条 op 是否值得丢弃。
+   *
+   * 服务端把失败的 op_id 回传，但失败原因无法区分「数据非法（永久）」和
+   * 「DB 抖动（瞬时）」。一次失败就丢可能丢学习记录，连续 3 次才丢则能
+   * 容忍瞬时故障，同时保证真正非法的记录最终被清出队列、不再堵死同步。
+   */
+  function shouldDropOp(opId, failed) {
+    opId = String(opId);
+    failed.tries[opId] = (failed.tries[opId] || 0) + 1;
+    return failed.tries[opId] >= 3;
+  }
   function updateSync(t) {
     const el = $("#sync-state"); if (el) el.textContent = t;
     const top = $("#sync-top-text"); if (top) top.textContent = t;
