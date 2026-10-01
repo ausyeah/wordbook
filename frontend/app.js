@@ -5,11 +5,26 @@
   // API 服务地址（CloudBase HTTP 网关域名）
   const API_BASE = "https://YOUR_ENV_ID.ap-shanghai.app.tcloudbase.com"; // TODO: 替换为你的 CloudBase 环境 HTTP 网关域名（见 README 部署步骤 4）
 
+  // localStorage 读取一律走这里：数据可能因写入中断、跨标签页并发或版本变更而损坏，
+  // 顶层直接 JSON.parse 会让整个 IIFE 抛错，initAuth 永不执行，页面彻底白屏且无自救入口。
+  function readLS(key, dflt, wantArray) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw == null) return dflt;
+      const v = JSON.parse(raw);
+      if (wantArray) return Array.isArray(v) ? v : dflt;
+      return v && typeof v === "object" && !Array.isArray(v) ? v : dflt;
+    } catch (e) {
+      try { localStorage.removeItem(key); } catch (_) {}
+      return dflt;
+    }
+  }
+
   const S = {
     token: localStorage.getItem("wb_token") || null,
     username: localStorage.getItem("wb_user") || null,
     vocab: [], vmap: {}, progress: {}, settings: { dailyGoal: 100 },
-    outbox: JSON.parse(localStorage.getItem("wb_outbox") || "[]"),
+    outbox: readLS("wb_outbox", [], true),
     deviceId: (function () {
       const d = localStorage.getItem("wb_device");
       if (d) return d;
@@ -98,9 +113,23 @@
       } catch (err) { $("#auth-msg").textContent = String(err.message || err); }
     };
   }
+  // 用户主动登出前的拦截：outbox 是唯一的本地持久层（S.progress 从不写 localStorage），
+  // 登出丢弃它 = 离线/失败期间答的题永久丢失。有存货时必须显式确认。
+  function confirmLogout() {
+    if (S.outbox.length > 0) {
+      if (!confirm("还有 " + S.outbox.length + " 条记录没同步到云端。\n退出将永久丢失这些答题记录，是否继续？")) return false;
+      if (!confirm("再确认一次：真的要丢弃这 " + S.outbox.length + " 条记录并退出？")) return false;
+      return true;
+    }
+    return confirm("确定退出账号？\n学习进度已保存在云端，重新登录即可恢复。");
+  }
   function logout() {
     S.token = null; S.username = null;
     S.progress = {}; S.outbox = []; S.history = []; S.pending = []; S.current = null;
+    S.settings = { dailyGoal: 100 };
+    S.options = []; S.answered = false; S.sessionDone = {};
+    S.defer = []; S.deferCount = {}; S.reWrong = {}; S.qCount = 0;
+    clearTimeout(_retryTimer); _retryTimer = null;
     localStorage.removeItem("wb_token"); localStorage.removeItem("wb_user"); localStorage.removeItem("wb_outbox");
     $("#app").classList.add("hidden"); $("#auth").classList.remove("hidden");
   }
@@ -191,8 +220,20 @@
   }
 
   // ---------- 同步 outbox ----------
-  function saveOutbox() { localStorage.setItem("wb_outbox", JSON.stringify(S.outbox)); }
-  let _flushing = false, _retryTimer = null;
+  function saveOutbox() {
+    // 配额溢出时 setItem 会抛 QuotaExceededError。若不接住，异常会顺着 pushOp
+    // 冒到 commitResult，把答题记账打断在中间（qCount/history/render 都不执行），
+    // 而 S.answered 已被置 true —— 结果是学习页彻底僵死，只能刷新。
+    // 这里返回 false 而不是抛出：队列仍在内存里，数据不丢，只是没落盘。
+    try {
+      localStorage.setItem("wb_outbox", JSON.stringify(S.outbox));
+      return true;
+    } catch (e) {
+      updateSync("本地缓存已满 · 请立即同步");
+      return false;
+    }
+  }
+  let _flushing = false, _retryTimer = null, _loopBound = false;
   async function flush() {
     if (_flushing) return;                 // 防并发：上一次还没结束不重复发
     if (!S.token || !navigator.onLine || S.outbox.length === 0) return;
@@ -217,6 +258,12 @@
     }
   }
   function startSyncLoop() {
+    // 登录成功和页面启动都会调 boot()，而 boot() 末尾会走到这里。
+    // addEventListener 不会覆盖旧监听器、setInterval 永不清理，不加闸门就会无界累积：
+    // 反复登录登出后，卡片模式按一次 Enter 会有多个监听器依次执行，
+    // 第一个翻到下一题、第二个把下一题的答案直接揭开。
+    if (_loopBound) return;
+    _loopBound = true;
     window.addEventListener("online", flush);
     document.addEventListener("visibilitychange", () => { if (!document.hidden) flush(); });
     setInterval(flush, 30000);
@@ -235,6 +282,24 @@
     return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0, 0) - 8 * 3600 * 1000;
   }
   function rand(n) { return Math.floor(Math.random() * n); }
+  /**
+   * 生成发给服务端的 updated_at，必须对同一单词严格递增。
+   *
+   * 原因：服务端对 state op 的守卫是 `cur.updated_at <= ts`（api/index.js:361），
+   * 而 answer op 的 updated_at 是服务端自己打的 Date.now()。答完一题后立刻点
+   * 「☆ 熟词」，客户端取的 now 必然早于服务端刚盖的戳 → 守卫为假 → 整条 state op
+   * 被静默丢弃。UI 显示标记成功，云端没有，刷新后标记消失。
+   *
+   * 实测复现（含对照组）：客户端 ts 早于服务端 → is_mastered 仍为 false；
+   * 把 ts 改大 → is_mastered 变 true。
+   *
+   * 本地时钟可能落后或同毫秒，故取 max(现在, 已知时间戳 + 1)。
+   */
+  function nextTs(word) {
+    const cur = S.progress[word];
+    const known = cur ? (cur.updated_at || 0) : 0;
+    return Math.max(Date.now(), known + 1);
+  }
   function stateOf(word) {
     const st = S.progress[word];
     return st ? st : {
@@ -460,12 +525,13 @@
       reps: ns.reps, lapses: ns.lapses, is_wrong_book, ever_wrong, wrong_streak, wrong_added_at,
       wrong_count, correct_count, rev: (base.rev || 0) + 1, updated_at: Date.now(),
     };
-    pushOp({ type: "answer", word, rating, occurred_at: Date.now(), op_id: S.deviceId + ":" + Date.now() + ":" + Math.random().toString(36).slice(2, 8) });
     S.qCount += 1;
     if (S.studyMode === "quiz") S.history.push({ word, options: S.options.map((o) => ({ text: o.text, correct: o.correct })) });
     else S.history.push({ word, options: [] });
     if (S.history.length > 20) S.history.shift();
     renderDailyProgress(); // 若设置页可见则实时刷新今日进度
+    // pushOp 放在记账之后：它会触发 flush()，任何异常都不该打断本会话的计数与历史
+    pushOp({ type: "answer", word, rating, occurred_at: Date.now(), op_id: S.deviceId + ":" + Date.now() + ":" + Math.random().toString(36).slice(2, 8) });
   }
   // 四选一作答
   function answer(i) {
@@ -557,7 +623,7 @@
     const word = S.current.word;
     const base = stateOf(word);
     const FAR_FUTURE = Date.UTC(2100, 0, 1);
-    const now = Date.now();
+    const now = nextTs(word);
     S.progress[word] = {
       ...base, level: 3, due_at: FAR_FUTURE, is_mastered: true,
       is_wrong_book: false, wrong_streak: 0, rev: (base.rev || 0) + 1, updated_at: now,
@@ -710,22 +776,22 @@
   function removeEntry(word, tab) {
     const base = stateOf(word);
     const FAR_FUTURE = Date.UTC(2100, 0, 1);
+    const now = nextTs(word);   // 必须早于构造 ns，才能被写进下面的 updated_at
     let ns, msg;
     if (tab === "wrong") {
       if (!confirm('从错题本移除 "' + word + '"？\n移除后不再按错题复习（曾错记录保留）。')) return;
-      ns = { ...base, is_wrong_book: false, due_at: FAR_FUTURE, rev: (base.rev || 0) + 1, updated_at: Date.now() };
+      ns = { ...base, is_wrong_book: false, due_at: FAR_FUTURE, rev: (base.rev || 0) + 1, updated_at: now };
       msg = "已移出错题本";
     } else if (tab === "ever") {
       if (!confirm('清除 "' + word + '" 的曾错记录？')) return;
-      ns = { ...base, ever_wrong: false, rev: (base.rev || 0) + 1, updated_at: Date.now() };
+      ns = { ...base, ever_wrong: false, rev: (base.rev || 0) + 1, updated_at: now };
       msg = "已清除曾错记录";
     } else {
       if (!confirm('取消 "' + word + '" 的熟词标记？\n该词将重新进入学习。')) return;
-      ns = { ...base, is_mastered: false, level: 0, due_at: Date.now(), rev: (base.rev || 0) + 1, updated_at: Date.now() };
+      ns = { ...base, is_mastered: false, level: 0, due_at: now, rev: (base.rev || 0) + 1, updated_at: now };
       msg = "已取消熟词，重新学习";
     }
     S.progress[word] = ns;
-    const now = ns.updated_at;
     pushOp({
       type: "state", word,
       state: {
@@ -910,7 +976,7 @@
     };
     // 退出账号
     $("#btn-logout").onclick = () => {
-      if (confirm("确定退出账号？\n学习进度已保存在云端，重新登录即可恢复。")) logout();
+      if (confirmLogout()) logout();
     };
     $("#btn-import").onchange = (e) => {
       const f = e.target.files[0]; if (!f) return;
@@ -931,6 +997,10 @@
   }
   function pushStateOps() {
     for (const [w, st] of Object.entries(S.progress)) {
+      // 备份里的 updated_at 来自导出时的时刻，必然早于云端已有的时间戳，
+      // 直接照搬会被服务端 LWW 守卫静默丢弃。这里统一重打递增戳。
+      const ts = nextTs(w);
+      S.progress[w] = { ...st, updated_at: ts };
       pushOp({
         type: "state", word: w,
         state: {
@@ -939,7 +1009,7 @@
           wrong_added_at: st.wrong_added_at, wrong_count: st.wrong_count, correct_count: st.correct_count,
           is_mastered: st.is_mastered,
         },
-        updated_at: st.updated_at || Date.now(), op_id: "state:" + w + ":" + (st.updated_at || Date.now()),
+        updated_at: ts, op_id: "state:" + w + ":" + ts,
       });
     }
   }
@@ -960,7 +1030,7 @@
   function bindUI() {
     bindStudy(); bindLibrary(); bindWrong(); bindSettings();
     $$("[data-view]").forEach((b) => (b.onclick = () => switchView(b.dataset.view)));
-    $("#logout").onclick = logout;
+    $("#logout").onclick = () => { if (confirmLogout()) logout(); };
     $("#btn-reset").onclick = resetProgress;
   }
   async function resetProgress() {
