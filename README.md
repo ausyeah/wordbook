@@ -151,10 +151,21 @@ LWW + 幂等已经 100% 满足正确性。
 │   ├── app.js            # 渲染 / 路由 / 离线 outbox / SRS 镜像，API_BASE 需替换
 │   └── vocab.json        # 4356 词
 ├── database/schema.sql   # PostgreSQL 建表脚本（可重复执行）
+├── tests/
+│   └── srs.parity.test.js  # 前后端 SRS 镜像一致性测试（零依赖，node tests/srs.parity.test.js）
 ├── cloudbaserc.json      # 云函数配置（需填环境 ID 与密钥）
 ├── deploy.bat            # Windows 一键部署
 └── docs/                 # 完整技术方案与实现分析
 ```
+
+> **关于 SRS 镜像**：`frontend/app.js` 与 `api/index.js` 各持有一份 `applySRS`，
+> 前端用于本地即时反馈、后端用于同步时重算。两份必须逐字等价——
+> 历史上出现过后端照抄前端变量名（`iv` vs `interval_days`）导致答对时抛
+> `ReferenceError`、整批同步丢失的故障。改动任一侧后请运行一致性测试：
+>
+> ```bash
+> node tests/srs.parity.test.js
+> ```
 
 ## 部署
 
